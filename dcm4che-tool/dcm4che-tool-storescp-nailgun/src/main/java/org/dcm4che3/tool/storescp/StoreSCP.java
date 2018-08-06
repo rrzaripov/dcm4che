@@ -75,6 +75,8 @@ import org.dcm4che3.util.SafeClose;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.concurrent.atomic.AtomicBoolean;
+import com.martiansoftware.nailgun.NGContext;
 
 /**
  * @author Gunter Zeilinger <gunterze@gmail.com>
@@ -88,7 +90,7 @@ public class StoreSCP {
         ResourceBundle.getBundle("org.dcm4che3.tool.storescp.messages");
     private static final String PART_EXT = ".part";
 
-    private final Device device = new Device("storescp");
+    private final Device device = new Device("storescp-nailgun");
     private final ApplicationEntity ae = new ApplicationEntity("*");
     private final Connection conn = new Connection();
     private File storageDir;
@@ -259,11 +261,11 @@ public class StoreSCP {
             main.device.setExecutor(executorService);
             main.device.bindConnections();
         } catch (ParseException e) {
-            System.err.println("storescp: " + e.getMessage());
+            System.err.println("storescp-nailgun: " + e.getMessage());
             System.err.println(rb.getString("try"));
             System.exit(2);
         } catch (Exception e) {
-            System.err.println("storescp: " + e.getMessage());
+            System.err.println("storescp-nailgun: " + e.getMessage());
             e.printStackTrace();
             System.exit(2);
         }
@@ -302,4 +304,55 @@ public class StoreSCP {
         }
      }
 
+    public static void nailMain(final NGContext context) {
+        ExecutorService executorService = Executors.newCachedThreadPool();
+        ScheduledExecutorService scheduledExecutorService = Executors.newSingleThreadScheduledExecutor();
+        StoreSCP main = null;
+        try {
+            CommandLine cl = parseComandLine(context.getArgs());
+            main = new StoreSCP();
+            CLIUtils.configureBindServer(main.conn, main.ae, cl);
+            CLIUtils.configure(main.conn, cl);
+            main.setStatus(CLIUtils.getIntOption(cl, "status", 0));
+            configureTransferCapability(main.ae, cl);
+            configureStorageDirectory(main, cl);
+            main.device.setScheduledExecutor(scheduledExecutorService);
+            main.device.setExecutor(executorService);
+            main.device.bindConnections();
+        } catch (ParseException e) {
+            System.err.println("storescp-nailgun: " + e.getMessage());
+            System.err.println(rb.getString("try"));
+            System.exit(2);
+        } catch (Exception e) {
+            System.err.println("storescp-nailgun: " + e.getMessage());
+            e.printStackTrace();
+            System.exit(2);
+        }
+
+        try {
+            Object lock = new Object();
+            AtomicBoolean shutdown = new AtomicBoolean(false);
+
+            context.addClientListener(reason -> {
+                synchronized (lock) {
+                    shutdown.set(true);
+                    lock.notifyAll();
+                }
+            });
+
+            synchronized (lock) {
+                while (!shutdown.get()) {
+                    lock.wait(500);
+                }
+                executorService.shutdown();
+                scheduledExecutorService.shutdown();
+                main.device.waitForNoOpenConnections();
+                main.device.unbindConnections();
+            }
+        } catch (InterruptedException ignored) {
+            System.exit(42);
+        }
+        System.exit(0);
+
+    }
 }
